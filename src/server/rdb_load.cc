@@ -58,6 +58,7 @@ ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, list_experimental_v2);
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
+ABSL_FLAG(bool, ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
 
 namespace dfly {
 
@@ -1810,7 +1811,7 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
         }*/
       }
     }  // while (consumers_num)
-  }  // while (cgroup_num)
+  }    // while (cgroup_num)
 
   return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
 }
@@ -1935,6 +1936,7 @@ struct RdbLoader::ObjSettings {
 
 RdbLoader::RdbLoader(Service* service)
     : service_{service},
+      ignore_expiry_{GetFlag(FLAGS_ignore_expiry)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
       shard_buf_{shard_set->size()} {
 }
@@ -2691,7 +2693,11 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     item->is_sticky = settings->is_sticky;
     item->has_mc_flags = settings->has_mc_flags;
     item->mc_flags = settings->mc_flags;
-    item->expire_ms = settings->expiretime;
+    if (!ignore_expiry_) {
+      item->expire_ms = settings->expiretime;
+    } else {
+      item->expire_ms = 0;
+    }
 
     std::move(cleanup).Cancel();
     ShardId sid = Shard(item->key, shard_set->size());
@@ -2736,7 +2742,7 @@ bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) co
    * Similarly if the RDB is the preamble of an AOF file, we want to
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
-  if (ServerState::tlocal()->is_master && settings->has_expired) {
+  if (ServerState::tlocal()->is_master && settings->has_expired && !ignore_expiry_) {
     VLOG(3) << "Expire key on read: " << key;
     return true;
   }
